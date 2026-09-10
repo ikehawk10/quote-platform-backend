@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "db:up": "docker compose up -d",
     "db:down": "docker compose down",
-    "db:migrate": "docker compose exec -T postgres psql -U quote -d quote_platform -f - < db/migrations/001_create_quotes.sql"
+    "db:migrate": "sh -c 'for f in db/migrations/*.sql; do echo \"Applying $f\"; docker compose exec -T postgres psql -U quote -d quote_platform -v ON_ERROR_STOP=1 -f - < \"$f\" || exit 1; done'",
+    "db:migrate:file": "sh -c 'docker compose exec -T postgres psql -U quote -d quote_platform -v ON_ERROR_STOP=1 -f - < \"$1\"' --"
   },
   "engines": {
     "node": ">=20"

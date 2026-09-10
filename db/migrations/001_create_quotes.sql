@@ -4,7 +4,8 @@ CREATE TYPE quote_status AS ENUM (
   'PENDING',
   'PROCESSING',
   'COMPLETED',
-  'FAILED'
+  'FAILED',
+  'REJECTED'
 );
 
 CREATE TABLE quotes (
@@ -12,7 +13,11 @@ CREATE TABLE quotes (
   make text NOT NULL,
   model text NOT NULL,
   year integer NOT NULL,
+  date_of_birth date NOT NULL,
+  vin text,
+  state text NOT NULL,
   status quote_status NOT NULL DEFAULT 'PENDING',
+  rejection_reason text,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT quotes_year_check CHECK (year >= 1900 AND year <= 2100)
