@@ -2,7 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import { errorHandler } from "./middleware/errorHandler.js";
-import { quotesRouter } from "./routes/quotes.js";
+import { quotesRouter } from "./quotes/quote.routes.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
