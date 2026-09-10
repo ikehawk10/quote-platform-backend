@@ -13,7 +13,62 @@ const createQuoteSchema = z.object({
     .max(2100, "year must be <= 2100"),
 });
 
+const quoteIdSchema = z.uuid("id must be a valid UUID");
+
+type QuoteRow = {
+  id: string;
+  make: string;
+  model: string;
+  year: number;
+  status: string;
+  created_at: Date;
+  updated_at: Date;
+};
+
 export const quotesRouter = Router();
+
+quotesRouter.get("/:id", async (req, res, next) => {
+  try {
+    const parsed = quoteIdSchema.safeParse(req.params.id);
+
+    if (!parsed.success) {
+      res.status(400).json({
+        error: "Validation failed",
+        details: parsed.error.issues.map((issue) => ({
+          field: "id",
+          message: issue.message,
+        })),
+      });
+      return;
+    }
+
+    const result = await pool.query<QuoteRow>(
+      `SELECT id, make, model, year, status, created_at, updated_at
+       FROM quotes
+       WHERE id = $1`,
+      [parsed.data],
+    );
+
+    const quote = result.rows[0];
+
+    if (!quote) {
+      res.status(404).json({ error: "Quote not found" });
+      return;
+    }
+
+    res.status(200).json({
+      id: quote.id,
+      make: quote.make,
+      model: quote.model,
+      year: quote.year,
+      status: quote.status,
+      created_at: quote.created_at,
+      updated_at: quote.updated_at,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 
 quotesRouter.post("/", async (req, res, next) => {
   try {
