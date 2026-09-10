@@ -1,8 +1,8 @@
+import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import dotenv from "dotenv";
-
-dotenv.config();
+import { errorHandler } from "./middleware/errorHandler.js";
+import { quotesRouter } from "./routes/quotes.js";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -17,6 +17,10 @@ app.get("/health", (_req, res) => {
     timestamp: new Date().toISOString(),
   });
 });
+
+app.use("/quotes", quotesRouter);
+
+app.use(errorHandler);
 
 app.listen(PORT, () => {
   console.log(`Server listening on http://localhost:${PORT}`);
