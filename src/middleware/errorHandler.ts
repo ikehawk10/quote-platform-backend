@@ -1,18 +1,43 @@
 import type { ErrorRequestHandler } from "express";
 import { DatabaseError } from "pg";
+import { AppError } from "../errors/AppError.js";
+
+type ErrorBody = {
+  error: {
+    code: string;
+    message: string;
+  };
+  [key: string]: unknown;
+};
+
+function sendError(
+  res: Parameters<ErrorRequestHandler>[2],
+  statusCode: number,
+  code: string,
+  message: string,
+  details?: Record<string, unknown>,
+): void {
+  const body: ErrorBody = {
+    error: { code, message },
+    ...details,
+  };
+  res.status(statusCode).json(body);
+}
 
 export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
+  if (err instanceof AppError) {
+    sendError(res, err.statusCode, err.code, err.message, err.details);
+    return;
+  }
+
   if (err instanceof DatabaseError) {
     if (err.code === "23514") {
-      res.status(400).json({
-        error: "Validation failed",
-        details: [{ message: err.detail ?? "Database constraint violated" }],
-      });
+      sendError(res, 400, "VALIDATION_ERROR", "Request data failed a database constraint");
       return;
     }
 
-    console.error("Database error:", err);
-    res.status(503).json({ error: "Database unavailable" });
+    console.error("Unexpected database error:", err);
+    sendError(res, 503, "SERVICE_UNAVAILABLE", "Database unavailable");
     return;
   }
 
@@ -23,10 +48,10 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
     (err.code === "ECONNREFUSED" || err.code === "ENOTFOUND")
   ) {
     console.error("Database connection error:", err);
-    res.status(503).json({ error: "Database unavailable" });
+    sendError(res, 503, "SERVICE_UNAVAILABLE", "Database unavailable");
     return;
   }
 
-  console.error("Unhandled error:", err);
-  res.status(500).json({ error: "Internal server error" });
+  console.error("Unexpected internal error:", err);
+  sendError(res, 500, "INTERNAL_ERROR", "Internal server error");
 };

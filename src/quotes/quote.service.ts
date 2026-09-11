@@ -3,12 +3,18 @@ import {
   isSupportedState,
   unsupportedStateReason,
 } from "../config/states.js";
+import { AppError } from "../errors/AppError.js";
 import * as quoteRepository from "./quote.repository.js";
-import type { CreateQuoteInput, CreateQuoteResult, Quote } from "./quote.types.js";
+import type { CreateQuoteInput, Quote } from "./quote.types.js";
+
+export type AcceptedQuote = {
+  id: string;
+  status: "PENDING";
+};
 
 export async function createQuote(
   input: CreateQuoteInput,
-): Promise<CreateQuoteResult> {
+): Promise<AcceptedQuote> {
   const id = randomUUID();
 
   if (!isSupportedState(input.state)) {
@@ -25,12 +31,11 @@ export async function createQuote(
       rejection_reason: rejectionReason,
     });
 
-    return {
-      kind: "rejected",
+    throw AppError.badRequest("QUOTE_REJECTED", rejectionReason, {
       id: quote.id,
-      status: "REJECTED",
+      status: quote.status,
       rejection_reason: quote.rejection_reason ?? rejectionReason,
-    };
+    });
   }
 
   const quote = await quoteRepository.insertQuote({
@@ -46,12 +51,17 @@ export async function createQuote(
   });
 
   return {
-    kind: "accepted",
     id: quote.id,
     status: "PENDING",
   };
 }
 
-export async function getQuoteById(id: string): Promise<Quote | null> {
-  return quoteRepository.findQuoteById(id);
+export async function getQuoteById(id: string): Promise<Quote> {
+  const quote = await quoteRepository.findQuoteById(id);
+
+  if (!quote) {
+    throw AppError.notFound("QUOTE_NOT_FOUND", "Quote not found");
+  }
+
+  return quote;
 }

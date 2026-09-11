@@ -27,16 +27,3 @@ export type CreateQuoteInput = {
   vin?: string;
   state: string;
 };
-
-export type CreateQuoteResult =
-  | {
-      kind: "accepted";
-      id: string;
-      status: "PENDING";
-    }
-  | {
-      kind: "rejected";
-      id: string;
-      status: "REJECTED";
-      rejection_reason: string;
-    };
