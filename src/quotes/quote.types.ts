@@ -7,6 +7,10 @@ export type QuoteStatus =
 
 export type Quote = {
   id: string;
+  first_name: string;
+  last_name: string;
+  email: string;
+  address: string;
   make: string;
   model: string;
   year: number;
@@ -20,6 +24,10 @@ export type Quote = {
 };
 
 export type CreateQuoteInput = {
+  first_name: string;
+  last_name: string;
+  email: string;
+  address: string;
   make: string;
   model: string;
   year: number;

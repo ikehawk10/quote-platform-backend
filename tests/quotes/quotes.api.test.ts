@@ -13,6 +13,10 @@ vi.mock("../../src/quotes/quote.service.js", () => ({
 const app = createApp();
 
 const validBody = {
+  first_name: "Jane",
+  last_name: "Doe",
+  email: "jane.doe@example.com",
+  address: "123 Main St",
   make: "Toyota",
   model: "Camry",
   year: 2022,
@@ -23,6 +27,10 @@ const validBody = {
 function buildQuote(overrides: Partial<Quote> = {}): Quote {
   return {
     id: "11111111-1111-4111-8111-111111111111",
+    first_name: "Jane",
+    last_name: "Doe",
+    email: "jane.doe@example.com",
+    address: "123 Main St",
     make: "Toyota",
     model: "Camry",
     year: 2022,
@@ -56,6 +64,10 @@ describe("POST /quotes", () => {
       status: "PENDING",
     });
     expect(quoteService.createQuote).toHaveBeenCalledWith({
+      first_name: "Jane",
+      last_name: "Doe",
+      email: "jane.doe@example.com",
+      address: "123 Main St",
       make: "Toyota",
       model: "Camry",
       year: 2022,
@@ -151,6 +163,10 @@ describe("GET /quotes/:id", () => {
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({
       id: quote.id,
+      first_name: "Jane",
+      last_name: "Doe",
+      email: "jane.doe@example.com",
+      address: "123 Main St",
       make: "Toyota",
       model: "Camry",
       year: 2022,

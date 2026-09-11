@@ -10,6 +10,10 @@ CREATE TYPE quote_status AS ENUM (
 
 CREATE TABLE quotes (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  first_name text NOT NULL,
+  last_name text NOT NULL,
+  email text NOT NULL,
+  address text NOT NULL,
   make text NOT NULL,
   model text NOT NULL,
   year integer NOT NULL,

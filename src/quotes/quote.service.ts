@@ -17,16 +17,24 @@ export async function createQuote(
 ): Promise<AcceptedQuote> {
   const id = randomUUID();
 
+  const sharedFields = {
+    id,
+    first_name: input.first_name,
+    last_name: input.last_name,
+    email: input.email,
+    address: input.address,
+    make: input.make,
+    model: input.model,
+    year: input.year,
+    date_of_birth: input.date_of_birth,
+    vin: input.vin ?? null,
+    state: input.state,
+  };
+
   if (!isSupportedState(input.state)) {
     const rejectionReason = unsupportedStateReason(input.state);
     const quote = await quoteRepository.insertQuote({
-      id,
-      make: input.make,
-      model: input.model,
-      year: input.year,
-      date_of_birth: input.date_of_birth,
-      vin: input.vin ?? null,
-      state: input.state,
+      ...sharedFields,
       status: "REJECTED",
       rejection_reason: rejectionReason,
     });
@@ -39,13 +47,7 @@ export async function createQuote(
   }
 
   const quote = await quoteRepository.insertQuote({
-    id,
-    make: input.make,
-    model: input.model,
-    year: input.year,
-    date_of_birth: input.date_of_birth,
-    vin: input.vin ?? null,
-    state: input.state,
+    ...sharedFields,
     status: "PENDING",
     rejection_reason: null,
   });

@@ -16,6 +16,10 @@ function isAtLeast18(dateOfBirth: string, today = new Date()): boolean {
 }
 
 export const createQuoteSchema = z.object({
+  first_name: z.string().trim().min(1, "first_name is required"),
+  last_name: z.string().trim().min(1, "last_name is required"),
+  email: z.email("email must be a valid email address"),
+  address: z.string().trim().min(1, "address is required"),
   make: z.string().trim().min(1, "make is required"),
   model: z.string().trim().min(1, "model is required"),
   year: z

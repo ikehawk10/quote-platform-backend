@@ -13,6 +13,10 @@ vi.mock("../../src/quotes/quote.repository.js", () => ({
 }));
 
 const baseInput = {
+  first_name: "Jane",
+  last_name: "Doe",
+  email: "jane.doe@example.com",
+  address: "123 Main St",
   make: "Toyota",
   model: "Camry",
   year: 2022,
@@ -23,6 +27,10 @@ const baseInput = {
 function buildQuote(overrides: Partial<Quote> = {}): Quote {
   return {
     id: "11111111-1111-4111-8111-111111111111",
+    first_name: "Jane",
+    last_name: "Doe",
+    email: "jane.doe@example.com",
+    address: "123 Main St",
     make: "Toyota",
     model: "Camry",
     year: 2022,
@@ -58,6 +66,10 @@ describe("quote.service", () => {
       });
       expect(quoteRepository.insertQuote).toHaveBeenCalledWith(
         expect.objectContaining({
+          first_name: "Jane",
+          last_name: "Doe",
+          email: "jane.doe@example.com",
+          address: "123 Main St",
           make: "Toyota",
           model: "Camry",
           year: 2022,

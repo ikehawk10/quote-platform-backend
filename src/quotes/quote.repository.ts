@@ -3,6 +3,10 @@ import type { CreateQuoteInput, Quote, QuoteStatus } from "./quote.types.js";
 
 type QuoteRow = {
   id: string;
+  first_name: string;
+  last_name: string;
+  email: string;
+  address: string;
   make: string;
   model: string;
   year: number;
@@ -18,6 +22,10 @@ type QuoteRow = {
 function mapRow(row: QuoteRow): Quote {
   return {
     id: row.id,
+    first_name: row.first_name,
+    last_name: row.last_name,
+    email: row.email,
+    address: row.address,
     make: row.make,
     model: row.model,
     year: row.year,
@@ -33,6 +41,10 @@ function mapRow(row: QuoteRow): Quote {
 
 export async function insertQuote(input: {
   id: string;
+  first_name: string;
+  last_name: string;
+  email: string;
+  address: string;
   make: string;
   model: string;
   year: number;
@@ -48,11 +60,16 @@ export async function insertQuote(input: {
     rejection_reason: string | null;
   }>(
     `INSERT INTO quotes (
-       id, make, model, year, date_of_birth, vin, state, status, rejection_reason
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       id, first_name, last_name, email, address,
+       make, model, year, date_of_birth, vin, state, status, rejection_reason
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
      RETURNING id, status, rejection_reason`,
     [
       input.id,
+      input.first_name,
+      input.last_name,
+      input.email,
+      input.address,
       input.make,
       input.model,
       input.year,
@@ -69,7 +86,8 @@ export async function insertQuote(input: {
 
 export async function findQuoteById(id: string): Promise<Quote | null> {
   const result = await pool.query<QuoteRow>(
-    `SELECT id, make, model, year, date_of_birth::text AS date_of_birth, vin,
+    `SELECT id, first_name, last_name, email, address,
+            make, model, year, date_of_birth::text AS date_of_birth, vin,
             state, status, rejection_reason, created_at, updated_at
      FROM quotes
      WHERE id = $1`,
