@@ -2,6 +2,7 @@
   "name": "quote-platform-backend",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "description": "Backend API for the quoting platform",
   "main": "dist/index.js",
   "scripts": {
@@ -9,6 +10,8 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "db:up": "docker compose up -d",
     "db:down": "docker compose down",
     "db:migrate": "sh -c 'for f in db/migrations/*.sql; do echo \"Applying $f\"; docker compose exec -T postgres psql -U quote -d quote_platform -v ON_ERROR_STOP=1 -f - < \"$f\" || exit 1; done'",
@@ -29,7 +32,10 @@
     "@types/express": "^5.0.6",
     "@types/node": "^22.20.2",
     "@types/pg": "^8.23.1",
+    "@types/supertest": "^7.2.1",
+    "supertest": "^7.2.2",
     "tsx": "^4.23.13",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.0"
   }
 }
