@@ -25,6 +25,12 @@ function sendError(
 }
 
 export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
+  if (res.headersSent) {
+    console.error("Error after headers were sent:", err);
+    res.end();
+    return;
+  }
+
   if (err instanceof AppError) {
     sendError(res, err.statusCode, err.code, err.message, err.details);
     return;

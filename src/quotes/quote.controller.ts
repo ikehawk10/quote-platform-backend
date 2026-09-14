@@ -1,7 +1,8 @@
 import type { Request, Response } from "express";
 import { AppError } from "../errors/AppError.js";
 import * as quoteService from "./quote.service.js";
-import { quoteSseHub, writeSseEvent } from "./quote.sse.js";
+import { writeSseEvent } from "./quote.sse.js";
+import { openQuoteSseSession } from "./quote.sseSession.js";
 import { createQuoteSchema, quoteIdSchema } from "./quote.validation.js";
 
 export async function createQuote(req: Request, res: Response): Promise<void> {
@@ -60,21 +61,14 @@ export async function streamQuoteEvents(
     res.flushHeaders();
   }
 
-  const client = quoteSseHub.add(quoteId, res);
-
-  writeSseEvent(res, "connected", {
-    quoteId,
-    connectionId: client.id,
-  });
-
-  const cleanup = () => {
-    quoteSseHub.remove(quoteId, client.id);
-    req.off("close", cleanup);
-    req.off("aborted", cleanup);
-    res.off("close", cleanup);
-  };
-
-  req.on("close", cleanup);
-  req.on("aborted", cleanup);
-  res.on("close", cleanup);
+  try {
+    await openQuoteSseSession(quoteId, req, res);
+  } catch (error) {
+    // Headers are already flushed; surface a safe SSE error and close.
+    console.error(`Failed to open SSE session for quote ${quoteId}:`, error);
+    writeSseEvent(res, "error", {
+      message: "Unable to register quote event stream",
+    });
+    res.end();
+  }
 }

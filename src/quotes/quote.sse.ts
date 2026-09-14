@@ -52,6 +52,11 @@ export class QuoteSseHub {
   getActiveQuoteIds(): string[] {
     return [...this.clientsByQuoteId.keys()];
   }
+
+  /** Test helper to reset in-memory connections. */
+  clear(): void {
+    this.clientsByQuoteId.clear();
+  }
 }
 
 export const quoteSseHub = new QuoteSseHub();

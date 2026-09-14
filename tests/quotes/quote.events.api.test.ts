@@ -19,6 +19,15 @@ vi.mock("../../src/quotes/quote.service.js", async () => {
   };
 });
 
+vi.mock("../../src/quotes/quote.sseOwnership.js", () => ({
+  claimSseOwnership: vi.fn().mockResolvedValue(undefined),
+  refreshSseOwnership: vi.fn().mockResolvedValue(true),
+  releaseSseOwnership: vi.fn().mockResolvedValue(true),
+  SSE_OWNERSHIP_HEARTBEAT_MS: 10_000,
+  SSE_OWNERSHIP_TTL_SECONDS: 30,
+  sseOwnershipKey: (quoteId: string) => `sse:quote:${quoteId}`,
+}));
+
 const app = createApp();
 
 const quoteId = "11111111-1111-4111-8111-111111111111";
@@ -47,6 +56,7 @@ function buildQuote(overrides: Partial<Quote> = {}): Quote {
 describe("GET /quotes/:id/events", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    quoteSseHub.clear();
   });
 
   it("returns 400 for an invalid quote id", async () => {
