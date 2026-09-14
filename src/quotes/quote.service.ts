@@ -67,3 +67,8 @@ export async function getQuoteById(id: string): Promise<Quote> {
 
   return quote;
 }
+
+/** Ensures a quote exists before an SSE stream is opened. */
+export async function assertQuoteExists(id: string): Promise<Quote> {
+  return getQuoteById(id);
+}
