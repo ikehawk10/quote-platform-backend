@@ -48,6 +48,34 @@ export class QuoteSseHub {
     return this.clientsByQuoteId.get(quoteId)?.size ?? 0;
   }
 
+  /**
+   * Write an SSE event to all active clients for a quote.
+   * Returns how many clients were successfully written to.
+   * Individual write failures are logged and skipped.
+   */
+  broadcast(quoteId: string, event: string, data: unknown = {}): number {
+    const clients = this.clientsByQuoteId.get(quoteId);
+    if (!clients || clients.size === 0) {
+      return 0;
+    }
+
+    let sent = 0;
+
+    for (const client of clients.values()) {
+      try {
+        writeSseEvent(client.res, event, data);
+        sent += 1;
+      } catch (error) {
+        console.error(
+          `Failed to write SSE event "${event}" to client ${client.id} for quote ${quoteId}:`,
+          error,
+        );
+      }
+    }
+
+    return sent;
+  }
+
   /** Useful for tests / future broadcast work. */
   getActiveQuoteIds(): string[] {
     return [...this.clientsByQuoteId.keys()];
