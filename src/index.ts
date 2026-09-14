@@ -6,15 +6,28 @@ import {
   startQuoteEventsConsumer,
   stopQuoteEventsConsumer,
 } from "./messaging/rabbitmq.js";
+import { startOutboxPublisher } from "./outbox/outbox.publisher.js";
+import { startQuoteWorker } from "./quotes/quote.worker.js";
 
 const app = createApp();
 const PORT = Number(process.env.PORT) || 3000;
+const QUOTE_WORKER_INTERVAL_MS = Number(
+  process.env.QUOTE_WORKER_INTERVAL_MS ?? 2_000,
+);
+const OUTBOX_PUBLISHER_INTERVAL_MS = Number(
+  process.env.OUTBOX_PUBLISHER_INTERVAL_MS ?? 1_000,
+);
 
 let server: Server | null = null;
 let shuttingDown = false;
+let quoteWorkerTimer: NodeJS.Timeout | null = null;
+let outboxPublisherTimer: NodeJS.Timeout | null = null;
 
 async function start(): Promise<void> {
   await startQuoteEventsConsumer();
+
+  quoteWorkerTimer = startQuoteWorker(QUOTE_WORKER_INTERVAL_MS);
+  outboxPublisherTimer = startOutboxPublisher(OUTBOX_PUBLISHER_INTERVAL_MS);
 
   server = app.listen(PORT, () => {
     console.log(
@@ -29,6 +42,16 @@ async function shutdown(signal: string): Promise<void> {
   }
   shuttingDown = true;
   console.log(`Received ${signal}, shutting down…`);
+
+  if (quoteWorkerTimer) {
+    clearInterval(quoteWorkerTimer);
+    quoteWorkerTimer = null;
+  }
+
+  if (outboxPublisherTimer) {
+    clearInterval(outboxPublisherTimer);
+    outboxPublisherTimer = null;
+  }
 
   try {
     await stopQuoteEventsConsumer();

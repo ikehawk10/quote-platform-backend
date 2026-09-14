@@ -1,4 +1,6 @@
 import { pool } from "../db.js";
+import type { DbClient } from "../db/transaction.js";
+import { query } from "../db/transaction.js";
 import type { CreateQuoteInput, Quote, QuoteStatus } from "./quote.types.js";
 
 type QuoteRow = {
@@ -92,6 +94,65 @@ export async function findQuoteById(id: string): Promise<Quote | null> {
      FROM quotes
      WHERE id = $1`,
     [id],
+  );
+
+  const row = result.rows[0];
+  return row ? mapRow(row) : null;
+}
+
+export async function findPendingQuoteIds(
+  limit: number,
+  client?: DbClient,
+): Promise<string[]> {
+  const result = await query<{ id: string }>(
+    client,
+    `SELECT id
+     FROM quotes
+     WHERE status = 'PENDING'
+     ORDER BY created_at ASC
+     LIMIT $1`,
+    [limit],
+  );
+
+  return result.rows.map((row) => row.id);
+}
+
+export async function markQuoteCompleted(
+  id: string,
+  client?: DbClient,
+): Promise<Quote | null> {
+  const result = await query<QuoteRow>(
+    client,
+    `UPDATE quotes
+     SET status = 'COMPLETED',
+         updated_at = now()
+     WHERE id = $1
+       AND status IN ('PENDING', 'PROCESSING')
+     RETURNING id, first_name, last_name, email, address,
+               make, model, year, date_of_birth::text AS date_of_birth, vin,
+               state, status, rejection_reason, created_at, updated_at`,
+    [id],
+  );
+
+  const row = result.rows[0];
+  return row ? mapRow(row) : null;
+}
+
+export async function updateQuoteStatus(
+  id: string,
+  status: QuoteStatus,
+  client?: DbClient,
+): Promise<Quote | null> {
+  const result = await query<QuoteRow>(
+    client,
+    `UPDATE quotes
+     SET status = $2,
+         updated_at = now()
+     WHERE id = $1
+     RETURNING id, first_name, last_name, email, address,
+               make, model, year, date_of_birth::text AS date_of_birth, vin,
+               state, status, rejection_reason, created_at, updated_at`,
+    [id, status],
   );
 
   const row = result.rows[0];

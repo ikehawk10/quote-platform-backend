@@ -65,3 +65,9 @@ export async function releaseSseOwnership(quoteId: string): Promise<boolean> {
 
   return result === 1;
 }
+
+/** Returns the Node instance currently registered for a quote's SSE stream. */
+export async function getSseOwner(quoteId: string): Promise<string | null> {
+  const redis = await getRedis();
+  return redis.get(sseOwnershipKey(quoteId));
+}
