@@ -8,6 +8,7 @@ const {
   mockInsertOutbox,
   mockFindUnpublished,
   mockMarkPublished,
+  mockScheduleRetry,
   mockGetSseOwner,
   mockPublishQuoteEvent,
 } = vi.hoisted(() => ({
@@ -18,6 +19,7 @@ const {
   mockInsertOutbox: vi.fn(),
   mockFindUnpublished: vi.fn(),
   mockMarkPublished: vi.fn(),
+  mockScheduleRetry: vi.fn(),
   mockGetSseOwner: vi.fn(),
   mockPublishQuoteEvent: vi.fn(),
 }));
@@ -36,6 +38,7 @@ vi.mock("../../src/outbox/outbox.repository.js", () => ({
   insertOutboxEvent: mockInsertOutbox,
   findUnpublishedOutboxEvents: mockFindUnpublished,
   markOutboxEventPublished: mockMarkPublished,
+  scheduleOutboxRetry: mockScheduleRetry,
 }));
 
 vi.mock("../../src/quotes/quote.sseOwnership.js", () => ({
@@ -47,9 +50,27 @@ vi.mock("../../src/messaging/rabbitmq.js", () => ({
 }));
 
 import { completeQuoteWithOutbox } from "../../src/quotes/quote.completion.js";
-import { publishUnpublishedOutboxEvents } from "../../src/outbox/outbox.publisher.js";
+import {
+  nextOutboxAttemptAt,
+  OUTBOX_MAX_ATTEMPTS,
+  publishUnpublishedOutboxEvents,
+} from "../../src/outbox/outbox.publisher.js";
 
 const quoteId = "11111111-1111-4111-8111-111111111111";
+
+function unpublishedEvent(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "evt-1",
+    event_type: "quote.completed",
+    aggregate_id: quoteId,
+    payload: { quoteId, event: "quote.completed" },
+    created_at: new Date(),
+    published_at: null,
+    attempt_count: 0,
+    next_attempt_at: new Date(),
+    ...overrides,
+  };
+}
 
 describe("completeQuoteWithOutbox transaction", () => {
   beforeEach(() => {
@@ -104,22 +125,16 @@ describe("completeQuoteWithOutbox transaction", () => {
 describe("publishUnpublishedOutboxEvents", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockScheduleRetry.mockResolvedValue(unpublishedEvent({ attempt_count: 1 }));
+    mockMarkPublished.mockResolvedValue(
+      unpublishedEvent({ published_at: new Date() }),
+    );
   });
 
   it("marks published_at only after RabbitMQ accepts the message", async () => {
-    mockFindUnpublished.mockResolvedValue([
-      {
-        id: "evt-1",
-        event_type: "quote.completed",
-        aggregate_id: quoteId,
-        payload: { quoteId, event: "quote.completed" },
-        created_at: new Date(),
-        published_at: null,
-      },
-    ]);
+    mockFindUnpublished.mockResolvedValue([unpublishedEvent()]);
     mockGetSseOwner.mockResolvedValue("node-2");
     mockPublishQuoteEvent.mockResolvedValue(undefined);
-    mockMarkPublished.mockResolvedValue({ id: "evt-1", published_at: new Date() });
 
     const result = await publishUnpublishedOutboxEvents();
 
@@ -131,17 +146,8 @@ describe("publishUnpublishedOutboxEvents", () => {
     expect(result.published).toBe(1);
   });
 
-  it("leaves the event unpublished when RabbitMQ publish fails", async () => {
-    mockFindUnpublished.mockResolvedValue([
-      {
-        id: "evt-2",
-        event_type: "quote.completed",
-        aggregate_id: quoteId,
-        payload: { quoteId, event: "quote.completed" },
-        created_at: new Date(),
-        published_at: null,
-      },
-    ]);
+  it("schedules backoff when RabbitMQ publish fails", async () => {
+    mockFindUnpublished.mockResolvedValue([unpublishedEvent()]);
     mockGetSseOwner.mockResolvedValue("node-2");
     mockPublishQuoteEvent.mockRejectedValue(new Error("broker down"));
 
@@ -150,45 +156,69 @@ describe("publishUnpublishedOutboxEvents", () => {
     errorSpy.mockRestore();
 
     expect(mockMarkPublished).not.toHaveBeenCalled();
+    expect(mockScheduleRetry).toHaveBeenCalledWith(
+      "evt-1",
+      expect.any(Date),
+    );
     expect(result.failed).toBe(1);
   });
 
-  it("leaves the event unpublished when Redis has no SSE owner", async () => {
-    mockFindUnpublished.mockResolvedValue([
-      {
-        id: "evt-3",
-        event_type: "quote.completed",
-        aggregate_id: quoteId,
-        payload: { quoteId, event: "quote.completed" },
-        created_at: new Date(),
-        published_at: null,
-      },
-    ]);
+  it("defers with backoff once when Redis has no SSE owner", async () => {
+    mockFindUnpublished.mockResolvedValue([unpublishedEvent()]);
     mockGetSseOwner.mockResolvedValue(null);
 
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     const result = await publishUnpublishedOutboxEvents();
+    const logCount = logSpy.mock.calls.length;
     logSpy.mockRestore();
 
     expect(mockPublishQuoteEvent).not.toHaveBeenCalled();
     expect(mockMarkPublished).not.toHaveBeenCalled();
+    expect(mockScheduleRetry).toHaveBeenCalledWith(
+      "evt-1",
+      expect.any(Date),
+    );
     expect(result.deferredNoOwner).toBe(1);
+    expect(logCount).toBe(1);
+  });
+
+  it("does not re-log no-owner deferrals after the first attempt", async () => {
+    mockFindUnpublished.mockResolvedValue([
+      unpublishedEvent({ attempt_count: 2 }),
+    ]);
+    mockGetSseOwner.mockResolvedValue(null);
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    await publishUnpublishedOutboxEvents();
+    const logCount = logSpy.mock.calls.length;
+    logSpy.mockRestore();
+
+    expect(logCount).toBe(0);
+    expect(mockScheduleRetry).toHaveBeenCalled();
+  });
+
+  it("abandons SSE delivery after max no-owner attempts", async () => {
+    mockFindUnpublished.mockResolvedValue([
+      unpublishedEvent({ attempt_count: OUTBOX_MAX_ATTEMPTS - 1 }),
+    ]);
+    mockGetSseOwner.mockResolvedValue(null);
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = await publishUnpublishedOutboxEvents();
+    warnSpy.mockRestore();
+
+    expect(mockScheduleRetry).not.toHaveBeenCalled();
+    expect(mockMarkPublished).toHaveBeenCalledWith("evt-1");
+    expect(result.abandoned).toBe(1);
   });
 
   it("allows duplicate publication by design when mark-published never runs", async () => {
-    mockFindUnpublished.mockResolvedValue([
-      {
-        id: "evt-4",
-        event_type: "quote.completed",
-        aggregate_id: quoteId,
-        payload: { quoteId, event: "quote.completed" },
-        created_at: new Date(),
-        published_at: null,
-      },
-    ]);
+    mockFindUnpublished.mockResolvedValue([unpublishedEvent()]);
     mockGetSseOwner.mockResolvedValue("node-2");
     mockPublishQuoteEvent.mockResolvedValue(undefined);
-    mockMarkPublished.mockRejectedValue(new Error("db crash after publish"));
+    mockMarkPublished.mockRejectedValueOnce(
+      new Error("db crash after publish"),
+    );
 
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const first = await publishUnpublishedOutboxEvents();
@@ -196,22 +226,21 @@ describe("publishUnpublishedOutboxEvents", () => {
 
     expect(first.failed).toBe(1);
     expect(mockPublishQuoteEvent).toHaveBeenCalledTimes(1);
+    expect(mockScheduleRetry).toHaveBeenCalled();
 
-    // Event remains unpublished, so a later tick can publish again (at-least-once).
-    mockFindUnpublished.mockResolvedValue([
-      {
-        id: "evt-4",
-        event_type: "quote.completed",
-        aggregate_id: quoteId,
-        payload: { quoteId, event: "quote.completed" },
-        created_at: new Date(),
-        published_at: null,
-      },
-    ]);
-    mockMarkPublished.mockResolvedValue({ id: "evt-4", published_at: new Date() });
+    mockFindUnpublished.mockResolvedValue([unpublishedEvent()]);
+    mockMarkPublished.mockResolvedValue(
+      unpublishedEvent({ published_at: new Date() }),
+    );
 
     const second = await publishUnpublishedOutboxEvents();
     expect(mockPublishQuoteEvent).toHaveBeenCalledTimes(2);
     expect(second.published).toBe(1);
+  });
+
+  it("increases backoff delay with attempts", () => {
+    const first = nextOutboxAttemptAt(1).getTime();
+    const later = nextOutboxAttemptAt(4).getTime();
+    expect(later - Date.now()).toBeGreaterThan(first - Date.now());
   });
 });
