@@ -1,16 +1,30 @@
+import { NODE_INSTANCE_ID } from "../config/instance.js";
 import { completeQuoteWithOutbox } from "./quote.completion.js";
 import * as quoteRepository from "./quote.repository.js";
 
 const DEFAULT_BATCH_SIZE = 10;
 
+async function releaseClaim(quoteId: string): Promise<void> {
+  try {
+    await quoteRepository.releaseQuoteClaim(quoteId);
+  } catch (error) {
+    console.error(`Quote worker failed to release claim on quote ${quoteId}:`, error);
+  }
+}
+
 /**
- * Minimal quote worker: claims PENDING quotes and completes them
+ * Claims PENDING quotes (PENDING → PROCESSING) and completes each one
  * through the transactional outbox boundary.
  */
 export async function processPendingQuotes(
   limit = DEFAULT_BATCH_SIZE,
 ): Promise<number> {
-  const quoteIds = await quoteRepository.findPendingQuoteIds(limit);
+  // The claim commits on its own. Carrier calls must happen here, outside
+  // any open transaction; only completeQuoteWithOutbox opens one.
+  const quoteIds = await quoteRepository.claimPendingQuotes(
+    limit,
+    NODE_INSTANCE_ID,
+  );
   let completed = 0;
 
   for (const quoteId of quoteIds) {
@@ -19,6 +33,7 @@ export async function processPendingQuotes(
       completed += 1;
     } catch (error) {
       console.error(`Quote worker failed to complete quote ${quoteId}:`, error);
+      await releaseClaim(quoteId);
     }
   }
 

@@ -22,7 +22,7 @@ export async function completeQuoteWithOutbox(
 
     if (!quote) {
       throw new Error(
-        `Quote ${quoteId} was not eligible for completion (missing or already terminal)`,
+        `Quote ${quoteId} was not eligible for completion (missing or not PROCESSING)`,
       );
     }
 

@@ -100,21 +100,60 @@ export async function findQuoteById(id: string): Promise<Quote | null> {
   return row ? mapRow(row) : null;
 }
 
-export async function findPendingQuoteIds(
+/**
+ * Atomically moves up to `limit` PENDING quotes to PROCESSING, stamping
+ * claimed_by/claimed_at, and returns the IDs this caller claimed.
+ * SKIP LOCKED lets concurrent workers claim disjoint sets instead of
+ * blocking on (or double-claiming) the same rows.
+ */
+export async function claimPendingQuotes(
   limit: number,
+  workerId: string,
   client?: DbClient,
 ): Promise<string[]> {
   const result = await query<{ id: string }>(
     client,
-    `SELECT id
-     FROM quotes
-     WHERE status = 'PENDING'
-     ORDER BY created_at ASC
-     LIMIT $1`,
-    [limit],
+    `WITH claimable AS MATERIALIZED (
+       SELECT id
+       FROM quotes
+       WHERE status = 'PENDING'
+       ORDER BY created_at ASC
+       LIMIT $1
+       FOR UPDATE SKIP LOCKED
+     )
+     UPDATE quotes
+     SET status = 'PROCESSING',
+         claimed_by = $2,
+         claimed_at = now(),
+         updated_at = now()
+     FROM claimable
+     WHERE quotes.id = claimable.id
+       AND quotes.status = 'PENDING'
+     RETURNING quotes.id`,
+    [limit, workerId],
   );
 
   return result.rows.map((row) => row.id);
+}
+
+/** Returns a claimed quote to PENDING so a later worker tick can retry it. */
+export async function releaseQuoteClaim(
+  id: string,
+  client?: DbClient,
+): Promise<boolean> {
+  const result = await query(
+    client,
+    `UPDATE quotes
+     SET status = 'PENDING',
+         claimed_by = NULL,
+         claimed_at = NULL,
+         updated_at = now()
+     WHERE id = $1
+       AND status = 'PROCESSING'`,
+    [id],
+  );
+
+  return (result.rowCount ?? 0) > 0;
 }
 
 export async function markQuoteCompleted(
@@ -127,7 +166,7 @@ export async function markQuoteCompleted(
      SET status = 'COMPLETED',
          updated_at = now()
      WHERE id = $1
-       AND status IN ('PENDING', 'PROCESSING')
+       AND status = 'PROCESSING'
      RETURNING id, first_name, last_name, email, address,
                make, model, year, date_of_birth::text AS date_of_birth, vin,
                state, status, rejection_reason, created_at, updated_at`,
