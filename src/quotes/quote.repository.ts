@@ -1,7 +1,12 @@
 import { pool } from "../db.js";
 import type { DbClient } from "../db/transaction.js";
 import { query } from "../db/transaction.js";
-import type { CreateQuoteInput, Quote, QuoteStatus } from "./quote.types.js";
+import type {
+  CreateQuoteInput,
+  Quote,
+  QuoteClaim,
+  QuoteStatus,
+} from "./quote.types.js";
 
 type QuoteRow = {
   id: string;
@@ -102,18 +107,25 @@ export async function findQuoteById(id: string): Promise<Quote | null> {
 
 export const QUOTE_LEASE_SECONDS = 60;
 
+type ClaimRow = { id: string; claim_version: number };
+
+function toClaim(row: ClaimRow): QuoteClaim {
+  return { quoteId: row.id, version: row.claim_version };
+}
+
 /**
  * Atomically moves up to `limit` PENDING quotes to PROCESSING, making
- * `workerId` the owner with a QUOTE_LEASE_SECONDS lease, and returns the
- * IDs this caller claimed. SKIP LOCKED lets concurrent workers claim
- * disjoint sets instead of blocking on (or double-claiming) the same rows.
+ * `workerId` the owner with a QUOTE_LEASE_SECONDS lease and a new
+ * claim_version, and returns the claims this caller won. SKIP LOCKED lets
+ * concurrent workers claim disjoint sets instead of blocking on (or
+ * double-claiming) the same rows.
  */
 export async function claimPendingQuotes(
   limit: number,
   workerId: string,
   client?: DbClient,
-): Promise<string[]> {
-  const result = await query<{ id: string }>(
+): Promise<QuoteClaim[]> {
+  const result = await query<ClaimRow>(
     client,
     `WITH claimable AS MATERIALIZED (
        SELECT id
@@ -128,28 +140,30 @@ export async function claimPendingQuotes(
          claimed_by = $2,
          claimed_at = now(),
          lease_until = now() + make_interval(secs => $3),
+         claim_version = quotes.claim_version + 1,
          updated_at = now()
      FROM claimable
      WHERE quotes.id = claimable.id
        AND quotes.status = 'PENDING'
-     RETURNING quotes.id`,
+     RETURNING quotes.id, quotes.claim_version`,
     [limit, workerId, QUOTE_LEASE_SECONDS],
   );
 
-  return result.rows.map((row) => row.id);
+  return result.rows.map(toClaim);
 }
 
 /**
  * Atomically takes over up to `limit` PROCESSING quotes whose lease has
  * expired (PROCESSING → PROCESSING), making `workerId` the new owner with a
- * fresh lease. Quotes with a live lease are never touched.
+ * fresh lease and a new claim_version, which fences out the previous owner.
+ * Quotes with a live lease are never touched.
  */
 export async function reclaimExpiredQuotes(
   limit: number,
   workerId: string,
   client?: DbClient,
-): Promise<string[]> {
-  const result = await query<{ id: string }>(
+): Promise<QuoteClaim[]> {
+  const result = await query<ClaimRow>(
     client,
     `WITH reclaimable AS MATERIALIZED (
        SELECT id
@@ -164,21 +178,26 @@ export async function reclaimExpiredQuotes(
      SET claimed_by = $2,
          claimed_at = now(),
          lease_until = now() + make_interval(secs => $3),
+         claim_version = quotes.claim_version + 1,
          updated_at = now()
      FROM reclaimable
      WHERE quotes.id = reclaimable.id
        AND quotes.status = 'PROCESSING'
        AND quotes.lease_until < now()
-     RETURNING quotes.id`,
+     RETURNING quotes.id, quotes.claim_version`,
     [limit, workerId, QUOTE_LEASE_SECONDS],
   );
 
-  return result.rows.map((row) => row.id);
+  return result.rows.map(toClaim);
 }
 
-/** Returns a claimed quote to PENDING so a later worker tick can retry it. */
+/**
+ * Returns a claimed quote to PENDING so a later worker tick can retry it.
+ * Only the current claim holder can release; claim_version is kept so the
+ * next claim still moves it forward. Returns false if the claim is stale.
+ */
 export async function releaseQuoteClaim(
-  id: string,
+  claim: QuoteClaim,
   client?: DbClient,
 ): Promise<boolean> {
   const result = await query(
@@ -190,15 +209,17 @@ export async function releaseQuoteClaim(
          lease_until = NULL,
          updated_at = now()
      WHERE id = $1
-       AND status = 'PROCESSING'`,
-    [id],
+       AND status = 'PROCESSING'
+       AND claim_version = $2`,
+    [claim.quoteId, claim.version],
   );
 
   return (result.rowCount ?? 0) > 0;
 }
 
+/** Completes a quote only if `claim` is still the current claim on it. */
 export async function markQuoteCompleted(
-  id: string,
+  claim: QuoteClaim,
   client?: DbClient,
 ): Promise<Quote | null> {
   const result = await query<QuoteRow>(
@@ -208,10 +229,11 @@ export async function markQuoteCompleted(
          updated_at = now()
      WHERE id = $1
        AND status = 'PROCESSING'
+       AND claim_version = $2
      RETURNING id, first_name, last_name, email, address,
                make, model, year, date_of_birth::text AS date_of_birth, vin,
                state, status, rejection_reason, created_at, updated_at`,
-    [id],
+    [claim.quoteId, claim.version],
   );
 
   const row = result.rows[0];

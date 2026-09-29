@@ -23,6 +23,12 @@ export type Quote = {
   updated_at: Date;
 };
 
+/** Proof of ownership handed to a worker by claim/reclaim (a fencing token). */
+export type QuoteClaim = {
+  quoteId: string;
+  version: number;
+};
+
 export type CreateQuoteInput = {
   first_name: string;
   last_name: string;

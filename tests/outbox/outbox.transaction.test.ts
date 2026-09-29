@@ -57,6 +57,7 @@ import {
 } from "../../src/outbox/outbox.publisher.js";
 
 const quoteId = "11111111-1111-4111-8111-111111111111";
+const claim = { quoteId, version: 3 };
 
 function unpublishedEvent(overrides: Record<string, unknown> = {}) {
   return {
@@ -91,14 +92,14 @@ describe("completeQuoteWithOutbox transaction", () => {
       id: "22222222-2222-4222-8222-222222222222",
     });
 
-    const result = await completeQuoteWithOutbox(quoteId);
+    const result = await completeQuoteWithOutbox(claim);
 
     expect(result).toEqual({
       quote: { id: quoteId, status: "COMPLETED" },
       outboxEventId: "22222222-2222-4222-8222-222222222222",
     });
     expect(mockQuery).toHaveBeenCalledWith("BEGIN");
-    expect(mockUpdateQuote).toHaveBeenCalled();
+    expect(mockUpdateQuote).toHaveBeenCalledWith(claim, expect.anything());
     expect(mockInsertOutbox).toHaveBeenCalled();
     expect(mockQuery).toHaveBeenCalledWith("COMMIT");
     expect(mockRelease).toHaveBeenCalled();
@@ -111,7 +112,7 @@ describe("completeQuoteWithOutbox transaction", () => {
     });
     mockInsertOutbox.mockRejectedValue(new Error("outbox insert failed"));
 
-    await expect(completeQuoteWithOutbox(quoteId)).rejects.toThrow(
+    await expect(completeQuoteWithOutbox(claim)).rejects.toThrow(
       "outbox insert failed",
     );
 
@@ -119,6 +120,18 @@ describe("completeQuoteWithOutbox transaction", () => {
     expect(mockQuery).toHaveBeenCalledWith("ROLLBACK");
     expect(mockQuery).not.toHaveBeenCalledWith("COMMIT");
     expect(mockRelease).toHaveBeenCalled();
+  });
+
+  it("writes no outbox event when the claim version is stale", async () => {
+    mockUpdateQuote.mockResolvedValue(null);
+
+    await expect(completeQuoteWithOutbox(claim)).rejects.toThrow(
+      "claim version 3 is stale",
+    );
+
+    expect(mockInsertOutbox).not.toHaveBeenCalled();
+    expect(mockQuery).toHaveBeenCalledWith("ROLLBACK");
+    expect(mockQuery).not.toHaveBeenCalledWith("COMMIT");
   });
 });
 

@@ -1,14 +1,23 @@
 import { NODE_INSTANCE_ID } from "../config/instance.js";
 import { completeQuoteWithOutbox } from "./quote.completion.js";
 import * as quoteRepository from "./quote.repository.js";
+import type { QuoteClaim } from "./quote.types.js";
 
 const DEFAULT_BATCH_SIZE = 10;
 
-async function releaseClaim(quoteId: string): Promise<void> {
+async function releaseClaim(claim: QuoteClaim): Promise<void> {
   try {
-    await quoteRepository.releaseQuoteClaim(quoteId);
+    const released = await quoteRepository.releaseQuoteClaim(claim);
+    if (!released) {
+      console.warn(
+        `Quote worker no longer owns quote ${claim.quoteId} (claim version ${claim.version} is stale); leaving it to the current owner`,
+      );
+    }
   } catch (error) {
-    console.error(`Quote worker failed to release claim on quote ${quoteId}:`, error);
+    console.error(
+      `Quote worker failed to release claim on quote ${claim.quoteId}:`,
+      error,
+    );
   }
 }
 
@@ -21,19 +30,22 @@ export async function processPendingQuotes(
 ): Promise<number> {
   // The claim commits on its own. Carrier calls must happen here, outside
   // any open transaction; only completeQuoteWithOutbox opens one.
-  const quoteIds = await quoteRepository.claimPendingQuotes(
+  const claims = await quoteRepository.claimPendingQuotes(
     limit,
     NODE_INSTANCE_ID,
   );
   let completed = 0;
 
-  for (const quoteId of quoteIds) {
+  for (const claim of claims) {
     try {
-      await completeQuoteWithOutbox(quoteId);
+      await completeQuoteWithOutbox(claim);
       completed += 1;
     } catch (error) {
-      console.error(`Quote worker failed to complete quote ${quoteId}:`, error);
-      await releaseClaim(quoteId);
+      console.error(
+        `Quote worker failed to complete quote ${claim.quoteId}:`,
+        error,
+      );
+      await releaseClaim(claim);
     }
   }
 

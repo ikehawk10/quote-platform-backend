@@ -19,19 +19,24 @@ vi.mock("../../src/quotes/quote.completion.js", () => ({
 import { NODE_INSTANCE_ID } from "../../src/config/instance.js";
 import { processPendingQuotes } from "../../src/quotes/quote.worker.js";
 
+const claim1 = { quoteId: "q-1", version: 1 };
+const claim2 = { quoteId: "q-2", version: 4 };
+
 describe("processPendingQuotes", () => {
   beforeEach(() => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    mockReleaseQuoteClaim.mockResolvedValue(true);
   });
 
-  it("claims up to the batch size as this instance and completes only the claimed quotes", async () => {
-    mockClaimPendingQuotes.mockResolvedValue(["q-1", "q-2"]);
+  it("claims as this instance and completes each quote with the version it received", async () => {
+    mockClaimPendingQuotes.mockResolvedValue([claim1, claim2]);
     mockCompleteQuote.mockResolvedValue({});
 
     const completed = await processPendingQuotes(5);
 
     expect(mockClaimPendingQuotes).toHaveBeenCalledWith(5, NODE_INSTANCE_ID);
-    expect(mockCompleteQuote.mock.calls).toEqual([["q-1"], ["q-2"]]);
+    expect(mockCompleteQuote.mock.calls).toEqual([[claim1], [claim2]]);
     expect(completed).toBe(2);
     expect(mockReleaseQuoteClaim).not.toHaveBeenCalled();
   });
@@ -43,8 +48,8 @@ describe("processPendingQuotes", () => {
     expect(mockCompleteQuote).not.toHaveBeenCalled();
   });
 
-  it("releases the claim when completion fails so the quote is retried", async () => {
-    mockClaimPendingQuotes.mockResolvedValue(["q-1", "q-2"]);
+  it("releases with the same claim version when completion fails", async () => {
+    mockClaimPendingQuotes.mockResolvedValue([claim1, claim2]);
     mockCompleteQuote
       .mockRejectedValueOnce(new Error("db down"))
       .mockResolvedValueOnce({});
@@ -52,7 +57,18 @@ describe("processPendingQuotes", () => {
     const completed = await processPendingQuotes();
 
     expect(completed).toBe(1);
-    expect(mockReleaseQuoteClaim).toHaveBeenCalledWith("q-1");
     expect(mockReleaseQuoteClaim).toHaveBeenCalledTimes(1);
+    expect(mockReleaseQuoteClaim).toHaveBeenCalledWith(claim1);
+  });
+
+  it("warns and moves on when its release is fenced by a newer claim", async () => {
+    mockClaimPendingQuotes.mockResolvedValue([claim1]);
+    mockCompleteQuote.mockRejectedValueOnce(new Error("stale"));
+    mockReleaseQuoteClaim.mockResolvedValueOnce(false);
+
+    expect(await processPendingQuotes()).toBe(0);
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining("claim version 1 is stale"),
+    );
   });
 });

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { pool } from "../../src/db.js";
+import { completeQuoteWithOutbox } from "../../src/quotes/quote.completion.js";
 import {
   claimPendingQuotes,
   insertQuote,
@@ -9,13 +10,14 @@ import {
   reclaimExpiredQuotes,
   releaseQuoteClaim,
 } from "../../src/quotes/quote.repository.js";
-import type { QuoteStatus } from "../../src/quotes/quote.types.js";
+import type { QuoteClaim, QuoteStatus } from "../../src/quotes/quote.types.js";
 
 type ClaimState = {
   status: QuoteStatus;
   claimed_by: string | null;
   claimed_at: Date | null;
   lease_until: Date | null;
+  claim_version: number;
 };
 
 async function seedQuote(status: QuoteStatus = "PENDING"): Promise<string> {
@@ -48,7 +50,8 @@ async function seedPendingQuotes(count: number): Promise<string[]> {
 
 async function claimStateOf(id: string): Promise<ClaimState> {
   const result = await pool.query<ClaimState>(
-    "SELECT status, claimed_by, claimed_at, lease_until FROM quotes WHERE id = $1",
+    `SELECT status, claimed_by, claimed_at, lease_until, claim_version
+     FROM quotes WHERE id = $1`,
     [id],
   );
   return result.rows[0];
@@ -71,6 +74,18 @@ function leaseSeconds(state: ClaimState): number {
 
 async function statusOf(id: string): Promise<QuoteStatus> {
   return (await claimStateOf(id)).status;
+}
+
+function idsOf(claims: QuoteClaim[]): string[] {
+  return claims.map((claim) => claim.quoteId);
+}
+
+async function outboxCountFor(id: string): Promise<number> {
+  const result = await pool.query<{ count: string }>(
+    "SELECT count(*) FROM outbox_events WHERE aggregate_id = $1",
+    [id],
+  );
+  return Number(result.rows[0].count);
 }
 
 beforeAll(async () => {
@@ -98,7 +113,7 @@ describe("claimPendingQuotes (PostgreSQL)", () => {
 
     const claimed = await claimPendingQuotes(10, "worker-a");
 
-    expect(claimed.sort()).toEqual([...ids].sort());
+    expect(idsOf(claimed).sort()).toEqual([...ids].sort());
     for (const id of ids) {
       const state = await claimStateOf(id);
       expect(state.status).toBe("PROCESSING");
@@ -109,7 +124,7 @@ describe("claimPendingQuotes (PostgreSQL)", () => {
     }
   });
 
-  it("new quotes start unclaimed", async () => {
+  it("new quotes start unclaimed at version 0", async () => {
     const [id] = await seedPendingQuotes(1);
 
     expect(await claimStateOf(id)).toMatchObject({
@@ -117,6 +132,7 @@ describe("claimPendingQuotes (PostgreSQL)", () => {
       claimed_by: null,
       claimed_at: null,
       lease_until: null,
+      claim_version: 0,
     });
   });
 
@@ -125,7 +141,7 @@ describe("claimPendingQuotes (PostgreSQL)", () => {
 
     const claimed = await claimPendingQuotes(2, "worker-a");
 
-    expect(claimed.sort()).toEqual(ids.slice(0, 2).sort());
+    expect(idsOf(claimed).sort()).toEqual(ids.slice(0, 2).sort());
     expect(await claimStateOf(ids[2])).toMatchObject({
       status: "PENDING",
       claimed_by: null,
@@ -142,7 +158,7 @@ describe("claimPendingQuotes (PostgreSQL)", () => {
 
     const claimed = await claimPendingQuotes(10, "worker-a");
 
-    expect(claimed).toEqual([pendingId]);
+    expect(idsOf(claimed)).toEqual([pendingId]);
     for (const id of others) {
       expect((await claimStateOf(id)).claimed_by).toBeNull();
     }
@@ -155,7 +171,7 @@ describe("claimPendingQuotes (PostgreSQL)", () => {
     const firstState = await claimStateOf(id);
     const second = await claimPendingQuotes(1, "worker-b");
 
-    expect(first).toEqual([id]);
+    expect(idsOf(first)).toEqual([id]);
     expect(second).toEqual([]);
     expect(await claimStateOf(id)).toEqual(firstState);
   });
@@ -182,10 +198,11 @@ describe("claimPendingQuotes (PostgreSQL)", () => {
 
     const winners = workers.filter((_, i) => results[i].length > 0);
     expect(winners).toHaveLength(1);
-    expect(results.flat()).toEqual([id]);
+    expect(results.flat()).toEqual([{ quoteId: id, version: 1 }]);
     expect(await claimStateOf(id)).toMatchObject({
       status: "PROCESSING",
       claimed_by: winners[0],
+      claim_version: 1,
     });
   });
 
@@ -198,7 +215,7 @@ describe("claimPendingQuotes (PostgreSQL)", () => {
     );
     const leftovers = await claimPendingQuotes(100, "worker-sweep");
 
-    const allClaimed = [...results.flat(), ...leftovers];
+    const allClaimed = idsOf([...results.flat(), ...leftovers]);
     expect(allClaimed).toHaveLength(ids.length);
     expect(new Set(allClaimed)).toEqual(new Set(ids));
 
@@ -207,11 +224,11 @@ describe("claimPendingQuotes (PostgreSQL)", () => {
     );
     const ownerById = new Map(owners.rows.map((r) => [r.id, r.claimed_by]));
     workers.forEach((workerId, i) => {
-      for (const id of results[i]) {
+      for (const id of idsOf(results[i])) {
         expect(ownerById.get(id)).toBe(workerId);
       }
     });
-    for (const id of leftovers) {
+    for (const id of idsOf(leftovers)) {
       expect(ownerById.get(id)).toBe("worker-sweep");
     }
   });
@@ -229,7 +246,7 @@ describe("claimPendingQuotes (PostgreSQL)", () => {
       await workerA.query("COMMIT");
       const claimedAfterCommit = await claimPendingQuotes(1, "worker-b");
 
-      expect(claimedByA).toEqual([id]);
+      expect(idsOf(claimedByA)).toEqual([id]);
       expect(claimedByB).toEqual([]);
       expect(claimedAfterCommit).toEqual([]);
       expect((await claimStateOf(id)).claimed_by).toBe("worker-a");
@@ -256,18 +273,21 @@ describe("claimPendingQuotes (PostgreSQL)", () => {
     }
   });
 
-  it("releases a claim back to PENDING and clears claim metadata", async () => {
+  it("releases a claim back to PENDING, clears ownership, and keeps the version", async () => {
     const [id] = await seedPendingQuotes(1);
-    await claimPendingQuotes(1, "worker-a");
+    const [claim] = await claimPendingQuotes(1, "worker-a");
 
-    expect(await releaseQuoteClaim(id)).toBe(true);
+    expect(await releaseQuoteClaim(claim)).toBe(true);
     expect(await claimStateOf(id)).toMatchObject({
       status: "PENDING",
       claimed_by: null,
       claimed_at: null,
       lease_until: null,
+      claim_version: 1,
     });
-    expect(await claimPendingQuotes(1, "worker-b")).toEqual([id]);
+    expect(await claimPendingQuotes(1, "worker-b")).toEqual([
+      { quoteId: id, version: 2 },
+    ]);
   });
 });
 
@@ -281,7 +301,7 @@ describe("reclaimExpiredQuotes (PostgreSQL)", () => {
     const reclaimed = await reclaimExpiredQuotes(10, "worker-b");
 
     const after = await claimStateOf(id);
-    expect(reclaimed).toEqual([id]);
+    expect(idsOf(reclaimed)).toEqual([id]);
     expect(after.status).toBe("PROCESSING");
     expect(after.claimed_by).toBe("worker-b");
     expect(after.claimed_at!.getTime()).toBeGreaterThan(before.claimed_at!.getTime());
@@ -330,7 +350,7 @@ describe("reclaimExpiredQuotes (PostgreSQL)", () => {
 
     const reclaimed = await reclaimExpiredQuotes(2, "worker-b");
 
-    expect(reclaimed.sort()).toEqual([ids[1], ids[2]].sort());
+    expect(idsOf(reclaimed).sort()).toEqual([ids[1], ids[2]].sort());
     expect((await claimStateOf(ids[0])).claimed_by).toBe("crashed-worker");
   });
 
@@ -342,7 +362,7 @@ describe("reclaimExpiredQuotes (PostgreSQL)", () => {
     const first = await reclaimExpiredQuotes(1, "worker-b");
     const second = await reclaimExpiredQuotes(1, "worker-c");
 
-    expect(first).toEqual([id]);
+    expect(idsOf(first)).toEqual([id]);
     expect(second).toEqual([]);
     expect((await claimStateOf(id)).claimed_by).toBe("worker-b");
   });
@@ -359,8 +379,11 @@ describe("reclaimExpiredQuotes (PostgreSQL)", () => {
 
     const winners = workers.filter((_, i) => results[i].length > 0);
     expect(winners).toHaveLength(1);
-    expect(results.flat()).toEqual([id]);
-    expect((await claimStateOf(id)).claimed_by).toBe(winners[0]);
+    expect(results.flat()).toEqual([{ quoteId: id, version: 2 }]);
+    expect(await claimStateOf(id)).toMatchObject({
+      claimed_by: winners[0],
+      claim_version: 2,
+    });
   });
 
   it("never reclaims the same quote twice across concurrent workers, and records the real owner", async () => {
@@ -376,7 +399,7 @@ describe("reclaimExpiredQuotes (PostgreSQL)", () => {
     );
     const leftovers = await reclaimExpiredQuotes(100, "worker-sweep");
 
-    const allReclaimed = [...results.flat(), ...leftovers];
+    const allReclaimed = idsOf([...results.flat(), ...leftovers]);
     expect(allReclaimed).toHaveLength(ids.length);
     expect(new Set(allReclaimed)).toEqual(new Set(ids));
 
@@ -385,7 +408,7 @@ describe("reclaimExpiredQuotes (PostgreSQL)", () => {
     );
     const ownerById = new Map(owners.rows.map((r) => [r.id, r.claimed_by]));
     workers.forEach((workerId, i) => {
-      for (const id of results[i]) {
+      for (const id of idsOf(results[i])) {
         expect(ownerById.get(id)).toBe(workerId);
       }
     });
@@ -406,7 +429,7 @@ describe("reclaimExpiredQuotes (PostgreSQL)", () => {
       await workerB.query("COMMIT");
       const reclaimedAfterCommit = await reclaimExpiredQuotes(1, "worker-c");
 
-      expect(reclaimedByB).toEqual([id]);
+      expect(idsOf(reclaimedByB)).toEqual([id]);
       expect(reclaimedByC).toEqual([]);
       expect(reclaimedAfterCommit).toEqual([]);
       expect((await claimStateOf(id)).claimed_by).toBe("worker-b");
@@ -432,17 +455,130 @@ describe("reclaimExpiredQuotes (PostgreSQL)", () => {
       reclaimExpiredQuotes(100, "worker-b"),
     ]);
 
-    expect(new Set(claimed)).toEqual(new Set(pendingIds));
-    expect(new Set(reclaimed)).toEqual(new Set(expiredIds));
+    expect(new Set(idsOf(claimed))).toEqual(new Set(pendingIds));
+    expect(new Set(idsOf(reclaimed))).toEqual(new Set(expiredIds));
+  });
+});
+
+describe("claim version fencing (PostgreSQL)", () => {
+  it("initial claim increments the version and hands it to the worker", async () => {
+    const [id] = await seedPendingQuotes(1);
+
+    const claims = await claimPendingQuotes(1, "worker-a");
+
+    expect(claims).toEqual([{ quoteId: id, version: 1 }]);
+    expect((await claimStateOf(id)).claim_version).toBe(1);
+  });
+
+  it("reclaim increments the version again", async () => {
+    const [id] = await seedPendingQuotes(1);
+    await claimPendingQuotes(1, "worker-a");
+    await expireLease(id);
+
+    const claims = await reclaimExpiredQuotes(1, "worker-b");
+
+    expect(claims).toEqual([{ quoteId: id, version: 2 }]);
+    expect((await claimStateOf(id)).claim_version).toBe(2);
+  });
+
+  it("the version only moves forward across claim, release, re-claim, and reclaim", async () => {
+    const [id] = await seedPendingQuotes(1);
+
+    const [first] = await claimPendingQuotes(1, "worker-a");
+    await releaseQuoteClaim(first);
+    const [second] = await claimPendingQuotes(1, "worker-b");
+    await expireLease(id);
+    const [third] = await reclaimExpiredQuotes(1, "worker-c");
+
+    expect([first.version, second.version, third.version]).toEqual([1, 2, 3]);
+  });
+
+  it("a stale worker cannot complete after its quote was reclaimed; the new owner can", async () => {
+    const [id] = await seedPendingQuotes(1);
+    const [staleClaim] = await claimPendingQuotes(1, "worker-a");
+    await expireLease(id);
+    const [currentClaim] = await reclaimExpiredQuotes(1, "worker-b");
+
+    expect(await markQuoteCompleted(staleClaim)).toBeNull();
+    expect(await claimStateOf(id)).toMatchObject({
+      status: "PROCESSING",
+      claimed_by: "worker-b",
+    });
+
+    expect((await markQuoteCompleted(currentClaim))?.status).toBe("COMPLETED");
+  });
+
+  it("a stale worker cannot release a quote that was reclaimed", async () => {
+    const [id] = await seedPendingQuotes(1);
+    const [staleClaim] = await claimPendingQuotes(1, "worker-a");
+    await expireLease(id);
+    await reclaimExpiredQuotes(1, "worker-b");
+    const ownedByB = await claimStateOf(id);
+
+    expect(await releaseQuoteClaim(staleClaim)).toBe(false);
+    expect(await claimStateOf(id)).toEqual(ownedByB);
+  });
+
+  it("a stale worker cannot complete after its claim was released and re-claimed", async () => {
+    const [id] = await seedPendingQuotes(1);
+    const [staleClaim] = await claimPendingQuotes(1, "worker-a");
+    await releaseQuoteClaim(staleClaim);
+    const [currentClaim] = await claimPendingQuotes(1, "worker-b");
+
+    expect(await markQuoteCompleted(staleClaim)).toBeNull();
+    expect(await releaseQuoteClaim(staleClaim)).toBe(false);
+    expect((await claimStateOf(id)).claimed_by).toBe("worker-b");
+    expect((await markQuoteCompleted(currentClaim))?.status).toBe("COMPLETED");
+  });
+
+  it("a release cannot be replayed", async () => {
+    const [id] = await seedPendingQuotes(1);
+    const [claim] = await claimPendingQuotes(1, "worker-a");
+
+    expect(await releaseQuoteClaim(claim)).toBe(true);
+    expect(await releaseQuoteClaim(claim)).toBe(false);
+    expect(await statusOf(id)).toBe("PENDING");
+  });
+
+  it("when stale and current owners complete concurrently, only the current owner wins", async () => {
+    const [id] = await seedPendingQuotes(1);
+    const [staleClaim] = await claimPendingQuotes(1, "worker-a");
+    await expireLease(id);
+    const [currentClaim] = await reclaimExpiredQuotes(1, "worker-b");
+
+    const [staleResult, currentResult] = await Promise.all([
+      markQuoteCompleted(staleClaim),
+      markQuoteCompleted(currentClaim),
+    ]);
+
+    expect(staleResult).toBeNull();
+    expect(currentResult?.status).toBe("COMPLETED");
+  });
+
+  it("a stale completion writes no outbox event; the current owner's writes exactly one", async () => {
+    const [id] = await seedPendingQuotes(1);
+    const [staleClaim] = await claimPendingQuotes(1, "worker-a");
+    await expireLease(id);
+    const [currentClaim] = await reclaimExpiredQuotes(1, "worker-b");
+
+    await expect(completeQuoteWithOutbox(staleClaim)).rejects.toThrow(
+      "claim version 1 is stale",
+    );
+    expect(await outboxCountFor(id)).toBe(0);
+
+    await completeQuoteWithOutbox(currentClaim);
+    expect(await outboxCountFor(id)).toBe(1);
+    expect(await statusOf(id)).toBe("COMPLETED");
   });
 });
 
 describe("markQuoteCompleted (PostgreSQL)", () => {
-  it("completes a PROCESSING quote", async () => {
+  it("completes a PROCESSING quote with the current claim", async () => {
     const [id] = await seedPendingQuotes(1);
-    await claimPendingQuotes(1, "worker-a");
+    const [claim] = await claimPendingQuotes(1, "worker-a");
 
-    expect((await markQuoteCompleted(id))?.status).toBe("COMPLETED");
+    expect((await markQuoteCompleted(claim))?.id).toBe(id);
+    expect(await statusOf(id)).toBe("COMPLETED");
   });
 
   it.each(["PENDING", "COMPLETED", "FAILED", "REJECTED"] as const)(
@@ -450,18 +586,29 @@ describe("markQuoteCompleted (PostgreSQL)", () => {
     async (status) => {
       const id = await seedQuote(status);
 
-      expect(await markQuoteCompleted(id)).toBeNull();
+      expect(await markQuoteCompleted({ quoteId: id, version: 0 })).toBeNull();
       expect(await statusOf(id)).toBe(status);
+    },
+  );
+
+  it.each([0, 2])(
+    "refuses to complete a PROCESSING quote with non-matching version %i",
+    async (version) => {
+      const [id] = await seedPendingQuotes(1);
+      await claimPendingQuotes(1, "worker-a");
+
+      expect(await markQuoteCompleted({ quoteId: id, version })).toBeNull();
+      expect(await statusOf(id)).toBe("PROCESSING");
     },
   );
 
   it("completes a claimed quote only once", async () => {
     const [id] = await seedPendingQuotes(1);
-    await claimPendingQuotes(1, "worker-a");
+    const [claim] = await claimPendingQuotes(1, "worker-a");
 
     const results = await Promise.all([
-      markQuoteCompleted(id),
-      markQuoteCompleted(id),
+      markQuoteCompleted(claim),
+      markQuoteCompleted(claim),
     ]);
 
     expect(results.filter((quote) => quote !== null)).toHaveLength(1);

@@ -1,7 +1,7 @@
 import { withTransaction } from "../db/transaction.js";
 import * as outboxRepository from "../outbox/outbox.repository.js";
 import * as quoteRepository from "./quote.repository.js";
-import type { Quote } from "./quote.types.js";
+import type { Quote, QuoteClaim } from "./quote.types.js";
 
 export const QUOTE_COMPLETED_EVENT = "quote.completed";
 
@@ -12,17 +12,18 @@ export type CompletedQuoteResult = {
 
 /**
  * Completes a quote and inserts the corresponding outbox event
- * in a single PostgreSQL transaction.
+ * in a single PostgreSQL transaction. Fails without side effects if
+ * `claim` is no longer the current claim on the quote.
  */
 export async function completeQuoteWithOutbox(
-  quoteId: string,
+  claim: QuoteClaim,
 ): Promise<CompletedQuoteResult> {
   return withTransaction(async (client) => {
-    const quote = await quoteRepository.markQuoteCompleted(quoteId, client);
+    const quote = await quoteRepository.markQuoteCompleted(claim, client);
 
     if (!quote) {
       throw new Error(
-        `Quote ${quoteId} was not eligible for completion (missing or not PROCESSING)`,
+        `Quote ${claim.quoteId} was not eligible for completion (missing, not PROCESSING, or claim version ${claim.version} is stale)`,
       );
     }
 
