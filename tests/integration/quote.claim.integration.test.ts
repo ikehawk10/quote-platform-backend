@@ -1,111 +1,26 @@
-import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { pool } from "../../src/db.js";
 import { completeQuoteWithOutbox } from "../../src/quotes/quote.completion.js";
 import {
   claimPendingQuotes,
-  insertQuote,
   markQuoteCompleted,
-  QUOTE_LEASE_SECONDS,
   reclaimExpiredQuotes,
   releaseQuoteClaim,
 } from "../../src/quotes/quote.repository.js";
-import type { QuoteClaim, QuoteStatus } from "../../src/quotes/quote.types.js";
+import type { QuoteStatus } from "../../src/quotes/quote.types.js";
+import {
+  claimStateOf,
+  expireLease,
+  idsOf,
+  leaseSeconds,
+  outboxCountFor,
+  seedPendingQuotes,
+  seedQuote,
+  statusOf,
+  useTestDatabase,
+} from "./helpers.js";
 
-type ClaimState = {
-  status: QuoteStatus;
-  claimed_by: string | null;
-  claimed_at: Date | null;
-  lease_until: Date | null;
-  claim_version: number;
-};
-
-async function seedQuote(status: QuoteStatus = "PENDING"): Promise<string> {
-  const id = randomUUID();
-  await insertQuote({
-    id,
-    first_name: "Test",
-    last_name: "Driver",
-    email: "test@example.com",
-    address: "1 Main St",
-    make: "Toyota",
-    model: "Camry",
-    year: 2020,
-    date_of_birth: "1990-01-01",
-    vin: null,
-    state: "TX",
-    status,
-    rejection_reason: status === "REJECTED" ? "Unsupported state" : null,
-  });
-  return id;
-}
-
-async function seedPendingQuotes(count: number): Promise<string[]> {
-  const ids: string[] = [];
-  for (let i = 0; i < count; i += 1) {
-    ids.push(await seedQuote("PENDING"));
-  }
-  return ids;
-}
-
-async function claimStateOf(id: string): Promise<ClaimState> {
-  const result = await pool.query<ClaimState>(
-    `SELECT status, claimed_by, claimed_at, lease_until, claim_version
-     FROM quotes WHERE id = $1`,
-    [id],
-  );
-  return result.rows[0];
-}
-
-/** Simulates a worker that claimed `id` and then stopped (crash / hang). */
-async function expireLease(id: string, expiredFor = "1 minute"): Promise<void> {
-  await pool.query(
-    `UPDATE quotes
-     SET claimed_at = now() - make_interval(secs => $3) - $2::interval,
-         lease_until = now() - $2::interval
-     WHERE id = $1`,
-    [id, expiredFor, QUOTE_LEASE_SECONDS],
-  );
-}
-
-function leaseSeconds(state: ClaimState): number {
-  return (state.lease_until!.getTime() - state.claimed_at!.getTime()) / 1000;
-}
-
-async function statusOf(id: string): Promise<QuoteStatus> {
-  return (await claimStateOf(id)).status;
-}
-
-function idsOf(claims: QuoteClaim[]): string[] {
-  return claims.map((claim) => claim.quoteId);
-}
-
-async function outboxCountFor(id: string): Promise<number> {
-  const result = await pool.query<{ count: string }>(
-    "SELECT count(*) FROM outbox_events WHERE aggregate_id = $1",
-    [id],
-  );
-  return Number(result.rows[0].count);
-}
-
-beforeAll(async () => {
-  const result = await pool.query<{ db: string }>(
-    "SELECT current_database() AS db",
-  );
-  if (!result.rows[0].db.endsWith("_test")) {
-    throw new Error(
-      `Refusing to run destructive integration tests against "${result.rows[0].db}"`,
-    );
-  }
-});
-
-beforeEach(async () => {
-  await pool.query("TRUNCATE outbox_events, quotes");
-});
-
-afterAll(async () => {
-  await pool.end();
-});
+useTestDatabase();
 
 describe("claimPendingQuotes (PostgreSQL)", () => {
   it("moves claimed quotes to PROCESSING with an owner and a 60-second lease", async () => {
