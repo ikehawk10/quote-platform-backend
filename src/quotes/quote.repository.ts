@@ -100,11 +100,13 @@ export async function findQuoteById(id: string): Promise<Quote | null> {
   return row ? mapRow(row) : null;
 }
 
+export const QUOTE_LEASE_SECONDS = 60;
+
 /**
- * Atomically moves up to `limit` PENDING quotes to PROCESSING, stamping
- * claimed_by/claimed_at, and returns the IDs this caller claimed.
- * SKIP LOCKED lets concurrent workers claim disjoint sets instead of
- * blocking on (or double-claiming) the same rows.
+ * Atomically moves up to `limit` PENDING quotes to PROCESSING, making
+ * `workerId` the owner with a QUOTE_LEASE_SECONDS lease, and returns the
+ * IDs this caller claimed. SKIP LOCKED lets concurrent workers claim
+ * disjoint sets instead of blocking on (or double-claiming) the same rows.
  */
 export async function claimPendingQuotes(
   limit: number,
@@ -125,12 +127,50 @@ export async function claimPendingQuotes(
      SET status = 'PROCESSING',
          claimed_by = $2,
          claimed_at = now(),
+         lease_until = now() + make_interval(secs => $3),
          updated_at = now()
      FROM claimable
      WHERE quotes.id = claimable.id
        AND quotes.status = 'PENDING'
      RETURNING quotes.id`,
-    [limit, workerId],
+    [limit, workerId, QUOTE_LEASE_SECONDS],
+  );
+
+  return result.rows.map((row) => row.id);
+}
+
+/**
+ * Atomically takes over up to `limit` PROCESSING quotes whose lease has
+ * expired (PROCESSING → PROCESSING), making `workerId` the new owner with a
+ * fresh lease. Quotes with a live lease are never touched.
+ */
+export async function reclaimExpiredQuotes(
+  limit: number,
+  workerId: string,
+  client?: DbClient,
+): Promise<string[]> {
+  const result = await query<{ id: string }>(
+    client,
+    `WITH reclaimable AS MATERIALIZED (
+       SELECT id
+       FROM quotes
+       WHERE status = 'PROCESSING'
+         AND lease_until < now()
+       ORDER BY lease_until ASC
+       LIMIT $1
+       FOR UPDATE SKIP LOCKED
+     )
+     UPDATE quotes
+     SET claimed_by = $2,
+         claimed_at = now(),
+         lease_until = now() + make_interval(secs => $3),
+         updated_at = now()
+     FROM reclaimable
+     WHERE quotes.id = reclaimable.id
+       AND quotes.status = 'PROCESSING'
+       AND quotes.lease_until < now()
+     RETURNING quotes.id`,
+    [limit, workerId, QUOTE_LEASE_SECONDS],
   );
 
   return result.rows.map((row) => row.id);
@@ -147,6 +187,7 @@ export async function releaseQuoteClaim(
      SET status = 'PENDING',
          claimed_by = NULL,
          claimed_at = NULL,
+         lease_until = NULL,
          updated_at = now()
      WHERE id = $1
        AND status = 'PROCESSING'`,
